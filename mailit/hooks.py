@@ -43,7 +43,7 @@ app_license = "mit"
 # page_js = {"page" : "public/js/file.js"}
 
 # include js in doctype views
-# doctype_js = {"doctype" : "public/js/doctype.js"}
+
 # doctype_list_js = {"doctype" : "public/js/doctype_list.js"}
 # doctype_tree_js = {"doctype" : "public/js/doctype_tree.js"}
 # doctype_calendar_js = {"doctype" : "public/js/doctype_calendar.js"}
@@ -247,3 +247,15 @@ app_license = "mit"
 # List of apps whose translatable strings should be excluded from this app's translations.
 # ignore_translatable_strings_from = []
 
+
+
+doctype_js = {"Stock Entry" : "public/stock_entry.js"}
+
+doc_events = {
+    "Stock Entry": {
+        "validate": [
+            "mailit.config.api.stock_entry_validate",
+            "mailit.config.api.validate_material_issue"
+        ]
+    }
+}
