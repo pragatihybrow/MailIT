@@ -30,6 +30,16 @@ BATCH_SLOT_VALUE_INDEX = 4
 AVERAGE_AGE_COLUMN = 6
 MAX_CHART_ITEMS = 10
 
+# Purchase docs whose stock-in SLEs can be traced back to an originating Purchase Order,
+# and the child-table link fieldname on each that points at the Purchase Order Item row.
+PO_LINKED_VOUCHER_ITEM_DOCTYPES = {
+	"Purchase Receipt": ("Purchase Receipt Item", "purchase_order_item"),
+	"Purchase Invoice": ("Purchase Invoice Item", "po_detail"),
+}
+
+# Keys on each item_details entry that accumulate PO paper-trail values as sets.
+PO_TRAIL_FIELDS = ("plants", "po_numbers", "requesters", "suppliers", "references")
+
 
 def execute(filters: Filters = None) -> tuple:
 	to_date = filters["to_date"]
@@ -50,6 +60,11 @@ def get_age_ranges(age_range: str) -> list[str]:
 
 def get_float_precision() -> int:
 	return cint(frappe.db.get_single_value("System Settings", "float_precision", cache=True))
+
+
+def join_values(values: set) -> str:
+	"Comma-join a set of PO paper-trail values, skipping empties, in a stable order."
+	return ", ".join(sorted({v for v in values if v}))
 
 
 def format_report_data(filters: Filters, item_details: dict, to_date: str) -> list[list]:
@@ -94,28 +109,6 @@ def get_batch_report_slot(slot: list) -> list:
 	return slot
 
 
-# def get_report_row(filters: Filters, item_dict: dict, fifo_queue: list, to_date: str, precision: int) -> list:
-# 	details = item_dict["details"]
-# 	range_values = get_range_age(filters, fifo_queue, to_date, item_dict, precision)
-# 	row = [details.name, details.item_name, details.description, details.item_group, details.brand]
-
-# 	if filters.get("show_warehouse_wise_stock"):
-# 		row.append(details.warehouse)
-
-# 	row.extend(
-# 		[
-# 			flt(item_dict.get("total_qty"), precision),
-# 			get_average_age(fifo_queue, to_date),
-# 			*range_values,
-# 			date_diff(to_date, fifo_queue[0][FIFO_DATE_INDEX]),
-# 			date_diff(to_date, fifo_queue[-1][FIFO_DATE_INDEX]),
-# 			details.stock_uom,
-# 		]
-# 	)
-
-# 	return row
-
-
 def get_report_row(filters: Filters, item_dict: dict, fifo_queue: list, to_date: str, precision: int) -> list:
 	details = item_dict["details"]
 	range_values = get_range_age(filters, fifo_queue, to_date, item_dict, precision)
@@ -132,11 +125,17 @@ def get_report_row(filters: Filters, item_dict: dict, fifo_queue: list, to_date:
 			date_diff(to_date, fifo_queue[0][FIFO_DATE_INDEX]),
 			date_diff(to_date, fifo_queue[-1][FIFO_DATE_INDEX]),
 			details.stock_uom,
-			flt(details.valuation_rate, precision),  # ← add this
+			flt(details.valuation_rate, precision),
+			join_values(item_dict.get("plants", set())),
+			join_values(item_dict.get("po_numbers", set())),
+			join_values(item_dict.get("requesters", set())),
+			join_values(item_dict.get("suppliers", set())),
+			join_values(item_dict.get("references", set())),
 		]
 	)
 
 	return row
+
 
 def get_average_age(fifo_queue: list, to_date: str) -> float:
 	age_qty = total_qty = 0.0
@@ -242,12 +241,17 @@ def get_columns(filters: Filters) -> list[dict]:
 			{"label": _("Earliest"), "fieldname": "earliest", "fieldtype": "Int", "width": 80},
 			{"label": _("Latest"), "fieldname": "latest", "fieldtype": "Int", "width": 80},
 			{"label": _("UOM"), "fieldname": "uom", "fieldtype": "Link", "options": "UOM", "width": 100},
-			{                                              # ← add this
+			{
 				"label": _("Valuation Rate"),
 				"fieldname": "valuation_rate",
 				"fieldtype": "Currency",
 				"width": 120,
 			},
+			{"label": _("Plant"), "fieldname": "plant", "fieldtype": "Link", "options": "Warehouse","width": 100},
+			{"label": _("PO Number"), "fieldname": "po_number", "fieldtype": "Link","options": "Purchase Order", "width": 130},
+			{"label": _("Requester"), "fieldname": "requester", "fieldtype": "Data", "width": 130},
+			{"label": _("Supplier"), "fieldname": "supplier", "fieldtype": "Link","options": "Supplier", "width": 150},
+			{"label": _("Reference No"), "fieldname": "reference_no", "fieldtype": "Data", "width": 130},
 		]
 	)
 
@@ -314,6 +318,7 @@ class FIFOSlots:
 		self.serial_no_details = {}
 		self.batch_no_details = {}
 		self.batchwise_valuation_by_batch = {}
+		self.po_details_by_voucher_detail = {}
 		self.filters = filters
 		self.sle = sle
 
@@ -335,8 +340,9 @@ class FIFOSlots:
 
 		if stock_ledger_entries is None:
 			# nested queries invalidate the streaming cursor below,
-			# so batchwise valuation flags must be resolved beforehand
+			# so batchwise valuation flags and PO paper-trail info must be resolved beforehand
 			self._prefetch_batchwise_valuations()
+			self._prefetch_po_details()
 
 		with frappe.db.unbuffered_cursor():
 			if stock_ledger_entries is None:
@@ -376,6 +382,7 @@ class FIFOSlots:
 		else:
 			self._compute_outgoing_stock(row, fifo_queue, transferred_item_key, serial_nos, batch_nos)
 
+		self._update_po_details(row, key)
 		self._update_balances(row, key)
 		self._trim_serial_fifo_queue(row, key, fifo_queue)
 
@@ -487,11 +494,98 @@ class FIFOSlots:
 		for batch_no, use_batchwise_valuation in query.run():
 			self.batchwise_valuation_by_batch[batch_no] = use_batchwise_valuation
 
+	def _prefetch_po_details(self) -> None:
+		"""
+		Prefetch the Purchase Order paper-trail (plant/PO number/requester/supplier/reference)
+		for every Purchase Receipt / Purchase Invoice detail row that was sourced from a PO,
+		keyed by voucher_detail_no so it can be looked up per-SLE during the streaming pass.
+		"""
+		self.po_details_by_voucher_detail = {}
+
+		to_date = get_datetime(self.filters.get("to_date") + " 23:59:59")
+		po = frappe.qb.DocType("Purchase Order")
+		poi = frappe.qb.DocType("Purchase Order Item")
+
+		for voucher_type, (item_doctype, link_field) in PO_LINKED_VOUCHER_ITEM_DOCTYPES.items():
+			sle = frappe.qb.DocType("Stock Ledger Entry")
+			voucher_item = frappe.qb.DocType(item_doctype)
+
+			query = (
+				frappe.qb.from_(sle)
+				.join(voucher_item)
+				.on(sle.voucher_detail_no == voucher_item.name)
+				.join(poi)
+				.on(voucher_item[link_field] == poi.name)
+				.join(po)
+				.on(poi.parent == po.name)
+				.select(
+					sle.voucher_detail_no,
+					po.name.as_("po_number"),
+					po.order_confirmation_no,
+					po.supplier_name,
+					poi.warehouse.as_("plant"),
+					poi.custom_requested_by.as_("requester"),
+				)
+				.where(
+					(sle.voucher_type == voucher_type)
+					& (sle.company == self.filters.get("company"))
+					& (sle.posting_datetime <= to_date)
+					& (sle.is_cancelled != 1)
+					& (voucher_item[link_field].isnotnull())
+				)
+			)
+
+			query = self._apply_filter(query, sle, "item_code")
+
+			if self.filters.get("warehouse"):
+				query = self._get_warehouse_conditions(sle, query)
+
+			for row in query.run(as_dict=True):
+				self.po_details_by_voucher_detail[row.voucher_detail_no] = {
+					"plant": row.plant,
+					"po_number": row.po_number,
+					"requester": row.requester,
+					"supplier": row.supplier_name,
+					"reference_no": row.order_confirmation_no,
+				}
+
+	def _update_po_details(self, row: dict, key: tuple) -> None:
+		"Attach PO paper-trail info to the item row for incoming, PO-sourced stock."
+		if row.actual_qty <= 0:
+			return
+
+		po_info = self.po_details_by_voucher_detail.get(row.voucher_detail_no)
+		if not po_info:
+			return
+
+		item_row = self.item_details[key]
+		if po_info.get("plant"):
+			item_row["plants"].add(po_info["plant"])
+		if po_info.get("po_number"):
+			item_row["po_numbers"].add(po_info["po_number"])
+		if po_info.get("requester"):
+			item_row["requesters"].add(po_info["requester"])
+		if po_info.get("supplier"):
+			item_row["suppliers"].add(po_info["supplier"])
+		if po_info.get("reference_no"):
+			item_row["references"].add(po_info["reference_no"])
+
 	def _init_key_stores(self, row: dict) -> tuple:
 		"Initialise keys and FIFO Queue."
 
 		key = (row.name, row.warehouse)
-		self.item_details.setdefault(key, {"details": row, "fifo_queue": []})
+		self.item_details.setdefault(
+			key,
+			{
+				"details": row,
+				"fifo_queue": [],
+				"plants": set(),
+				"po_numbers": set(),
+				"requesters": set(),
+				"suppliers": set(),
+				"references": set(),
+			},
+		)
 		fifo_queue = self.item_details[key]["fifo_queue"]
 
 		transferred_item_key = (row.voucher_no, row.name, row.warehouse)
@@ -905,6 +999,11 @@ class FIFOSlots:
 						"fifo_queue": [],
 						"qty_after_transaction": 0.0,
 						"total_qty": 0.0,
+						"plants": set(),
+						"po_numbers": set(),
+						"requesters": set(),
+						"suppliers": set(),
+						"references": set(),
 					},
 				)
 			item_row = item_aggregated_data.get(item)
@@ -914,6 +1013,9 @@ class FIFOSlots:
 			item_row["total_qty"] += flt(row["total_qty"])
 			item_row["has_serial_no"] = row["has_serial_no"]
 			item_row["has_batch_no"] = row["has_batch_no"]
+
+			for field in PO_TRAIL_FIELDS:
+				item_row[field] |= row.get(field, set())
 
 		return item_aggregated_data
 
