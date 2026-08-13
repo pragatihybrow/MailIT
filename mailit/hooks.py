@@ -249,7 +249,10 @@ app_license = "mit"
 
 
 
-doctype_js = {"Stock Entry" : "public/stock_entry.js"}
+doctype_js = {
+    "Stock Entry" : "public/stock_entry.js",
+    "Purchase Order":"public/purchase_order.js"
+    }
 
 doc_events = {
     "Stock Entry": {
