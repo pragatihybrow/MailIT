@@ -145,46 +145,6 @@ def validate_material_issue(doc, method):
                     f"You are trying to issue {row.qty}."
                 )
 
-# def get_remaining_po_items(po):
-#     """Returns list of (po_item, remaining_qty) for items not fully covered
-#     by submitted Material Issue Stock Entries against this PO."""
-
-#     po_refs = [po.name]
-#     if po.get("order_confirmation_no"):
-#         po_refs.append(po.order_confirmation_no)
-
-#     # custom_po_no lives on the Stock Entry (PARENT) doctype, not on Stock Entry Detail
-#     issued_entries = frappe.get_all(
-#         "Stock Entry",
-#         filters={
-#             "purpose": "Material Issue",
-#             "docstatus": 1,
-#             "custom_po_no": ["in", po_refs],   # <-- parent-level field
-#         },
-#         pluck="name",
-#     )
-
-#     issued_qty_map = {}
-#     if issued_entries:
-#         # Now pull child rows only for those matched parents
-#         issued_items = frappe.get_all(
-#             "Stock Entry Detail",
-#             filters={"parent": ["in", issued_entries]},
-#             fields=["item_code", "qty"],
-#         )
-#         for row in issued_items:
-#             issued_qty_map[row.item_code] = issued_qty_map.get(row.item_code, 0) + flt(row.qty)
-
-#     remaining = []
-#     for item in po.items:
-#         already_issued = flt(issued_qty_map.get(item.item_code, 0))
-#         remaining_qty = flt(item.qty) - already_issued
-#         if remaining_qty > 0:
-#             remaining.append((item, remaining_qty))
-
-#     return remaining
-
-
 def get_remaining_po_items(po):
     po_refs = [po.name]
     if po.get("order_confirmation_no"):
@@ -244,7 +204,6 @@ def get_remaining_po_items_summary(po_name):
         for item, remaining_qty in remaining
     ]
 
-
 @frappe.whitelist()
 def create_sales_order_from_po(po_name, customer, delivery_date=None):
     po = frappe.get_doc("Purchase Order", po_name)
@@ -260,10 +219,23 @@ def create_sales_order_from_po(po_name, customer, delivery_date=None):
     so = frappe.new_doc("Sales Order")
     so.customer = customer
     so.company = po.company
-    so.transaction_date = frappe.utils.nowdate()
-    so.delivery_date = delivery_date or frappe.utils.add_days(frappe.utils.nowdate(), 7)
+    so.transaction_date = po.transaction_date
+
+    # Header delivery_date: earliest schedule_date among the remaining rows
+    # (falls back to the passed-in value, then today+7, if none found)
+    earliest_schedule_date = min(
+        (item.schedule_date for item, _qty in remaining_rows if item.schedule_date),
+        default=None,
+    )
+    so.delivery_date = (
+        earliest_schedule_date
+        or delivery_date
+        or frappe.utils.add_days(frappe.utils.nowdate(), 7)
+    )
 
     for item, remaining_qty in remaining_rows:
+        item_delivery_date = item.schedule_date or delivery_date or so.delivery_date
+
         so.append("items", {
             "item_code": item.item_code,
             "item_name": item.item_name,
@@ -275,7 +247,7 @@ def create_sales_order_from_po(po_name, customer, delivery_date=None):
             "warehouse": item.warehouse,
             "purchase_order": po.name,
             "purchase_order_item": item.name,
-            "delivery_date": delivery_date or frappe.utils.add_days(frappe.utils.nowdate(), 7),
+            "delivery_date": item_delivery_date,
         })
 
     so.insert()
