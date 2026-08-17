@@ -42,11 +42,11 @@ frappe.ui.form.on('Purchase Order', {
                                     options: 'Customer',
                                     reqd: 1,
                                 },
-                                {
-                                    fieldtype: 'Date',
-                                    fieldname: 'delivery_date',
-                                    label: __('Delivery Date'),
-                                },
+                                // {
+                                //     fieldtype: 'Date',
+                                //     fieldname: 'delivery_date',
+                                //     label: __('Delivery Date'),
+                                // },
                             ],
                             primary_action_label: __('Create Sales Order'),
                             primary_action: function (values) {
