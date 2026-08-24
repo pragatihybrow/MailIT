@@ -7,11 +7,12 @@
  "disabled": 0,
  "docstatus": 0,
  "doctype": "Report",
+ "doctype_to_sync": [],
  "filters": [],
  "idx": 0,
  "is_standard": "Yes",
  "letter_head": null,
- "modified": "2026-06-19 10:29:53.851499",
+ "modified": "2026-08-24 17:45:09.254607",
  "modified_by": "Administrator",
  "module": "MailIT",
  "name": "Stock Ageing Custom",
@@ -49,5 +50,6 @@
    "role": "Desk User"
   }
  ],
+ "snapshot_report": 0,
  "timeout": 0
 }

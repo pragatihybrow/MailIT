@@ -37,9 +37,6 @@ PO_LINKED_VOUCHER_ITEM_DOCTYPES = {
 	"Purchase Invoice": ("Purchase Invoice Item", "po_detail"),
 }
 
-# Keys on each item_details entry that accumulate PO paper-trail values as sets.
-PO_TRAIL_FIELDS = ("plants", "po_numbers", "requesters", "suppliers", "references")
-
 
 def execute(filters: Filters = None) -> tuple:
 	to_date = filters["to_date"]
@@ -62,11 +59,6 @@ def get_float_precision() -> int:
 	return cint(frappe.db.get_single_value("System Settings", "float_precision", cache=True))
 
 
-def join_values(values: set) -> str:
-	"Comma-join a set of PO paper-trail values, skipping empties, in a stable order."
-	return ", ".join(sorted({v for v in values if v}))
-
-
 def format_report_data(filters: Filters, item_details: dict, to_date: str) -> list[list]:
 	"Returns ordered, formatted data with ranges."
 	data = []
@@ -82,7 +74,19 @@ def format_report_data(filters: Filters, item_details: dict, to_date: str) -> li
 		if not fifo_queue:
 			continue
 
-		data.append(get_report_row(filters, item_dict, fifo_queue, to_date, precision))
+		po_details = item_dict.get("po_details") or [{}]
+
+		for po in po_details:
+			data.append(
+				get_report_row(
+					filters,
+					item_dict,
+					fifo_queue,
+					to_date,
+					precision,
+					po,
+				)
+			)
 
 	return data
 
@@ -109,7 +113,14 @@ def get_batch_report_slot(slot: list) -> list:
 	return slot
 
 
-def get_report_row(filters: Filters, item_dict: dict, fifo_queue: list, to_date: str, precision: int) -> list:
+def get_report_row(
+	filters,
+	item_dict,
+	fifo_queue,
+	to_date,
+	precision,
+	po=None,
+):
 	details = item_dict["details"]
 	range_values = get_range_age(filters, fifo_queue, to_date, item_dict, precision)
 	row = [details.name, details.item_name, details.description, details.item_group, details.brand]
@@ -126,11 +137,11 @@ def get_report_row(filters: Filters, item_dict: dict, fifo_queue: list, to_date:
 			date_diff(to_date, fifo_queue[-1][FIFO_DATE_INDEX]),
 			details.stock_uom,
 			flt(details.valuation_rate, precision),
-			join_values(item_dict.get("plants", set())),
-			join_values(item_dict.get("po_numbers", set())),
-			join_values(item_dict.get("requesters", set())),
-			join_values(item_dict.get("suppliers", set())),
-			join_values(item_dict.get("references", set())),
+			po.get("plant", "") if po else "",
+			po.get("po_number", "") if po else "",
+			po.get("requester", "") if po else "",
+			po.get("supplier", "") if po else "",
+			po.get("reference_no", "") if po else "",
 		]
 	)
 
@@ -247,10 +258,10 @@ def get_columns(filters: Filters) -> list[dict]:
 				"fieldtype": "Currency",
 				"width": 120,
 			},
-			{"label": _("Plant"), "fieldname": "plant", "fieldtype": "Link", "options": "Warehouse","width": 100},
-			{"label": _("PO Number"), "fieldname": "po_number", "fieldtype": "Link","options": "Purchase Order", "width": 130},
+			{"label": _("Plant"), "fieldname": "plant", "fieldtype": "Link", "options": "Warehouse", "width": 100},
+			{"label": _("PO Number"), "fieldname": "po_number", "fieldtype": "Link", "options": "Purchase Order", "width": 130},
 			{"label": _("Requester"), "fieldname": "requester", "fieldtype": "Data", "width": 130},
-			{"label": _("Supplier"), "fieldname": "supplier", "fieldtype": "Link","options": "Supplier", "width": 150},
+			{"label": _("Supplier"), "fieldname": "supplier", "fieldtype": "Link", "options": "Supplier", "width": 150},
 			{"label": _("Reference No"), "fieldname": "reference_no", "fieldtype": "Data", "width": 130},
 		]
 	)
@@ -550,25 +561,23 @@ class FIFOSlots:
 				}
 
 	def _update_po_details(self, row: dict, key: tuple) -> None:
-		"Attach PO paper-trail info to the item row for incoming, PO-sourced stock."
 		if row.actual_qty <= 0:
 			return
 
 		po_info = self.po_details_by_voucher_detail.get(row.voucher_detail_no)
+
 		if not po_info:
 			return
 
-		item_row = self.item_details[key]
-		if po_info.get("plant"):
-			item_row["plants"].add(po_info["plant"])
-		if po_info.get("po_number"):
-			item_row["po_numbers"].add(po_info["po_number"])
-		if po_info.get("requester"):
-			item_row["requesters"].add(po_info["requester"])
-		if po_info.get("supplier"):
-			item_row["suppliers"].add(po_info["supplier"])
-		if po_info.get("reference_no"):
-			item_row["references"].add(po_info["reference_no"])
+		self.item_details[key]["po_details"].append(
+			{
+				"plant": po_info.get("plant"),
+				"po_number": po_info.get("po_number"),
+				"requester": po_info.get("requester"),
+				"supplier": po_info.get("supplier"),
+				"reference_no": po_info.get("reference_no"),
+			}
+		)
 
 	def _init_key_stores(self, row: dict) -> tuple:
 		"Initialise keys and FIFO Queue."
@@ -579,11 +588,7 @@ class FIFOSlots:
 			{
 				"details": row,
 				"fifo_queue": [],
-				"plants": set(),
-				"po_numbers": set(),
-				"requesters": set(),
-				"suppliers": set(),
-				"references": set(),
+				"po_details": [],
 			},
 		)
 		fifo_queue = self.item_details[key]["fifo_queue"]
@@ -999,11 +1004,7 @@ class FIFOSlots:
 						"fifo_queue": [],
 						"qty_after_transaction": 0.0,
 						"total_qty": 0.0,
-						"plants": set(),
-						"po_numbers": set(),
-						"requesters": set(),
-						"suppliers": set(),
-						"references": set(),
+						"po_details": [],
 					},
 				)
 			item_row = item_aggregated_data.get(item)
@@ -1014,8 +1015,7 @@ class FIFOSlots:
 			item_row["has_serial_no"] = row["has_serial_no"]
 			item_row["has_batch_no"] = row["has_batch_no"]
 
-			for field in PO_TRAIL_FIELDS:
-				item_row[field] |= row.get(field, set())
+			item_row["po_details"].extend(row.get("po_details", []))
 
 		return item_aggregated_data
 
