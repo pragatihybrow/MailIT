@@ -222,6 +222,7 @@ def create_sales_order_from_po(po_name, customer, delivery_date=None):
     so.transaction_date = po.transaction_date
     so.po_no = po.order_confirmation_no
     so.po_date = po.order_confirmation_date
+    so.custom_attach_po = po.custom_attach_po
 
     # Header delivery_date: earliest schedule_date among the remaining rows
     # (falls back to the passed-in value, then today+7, if none found)
