@@ -255,10 +255,37 @@ doctype_js = {
     }
 
 doc_events = {
+    "Purchase Order": {
+        "on_update": "mailit.config.stock_entry.on_workflow_state_change",
+    },
+    "Purchase Invoice": {
+        "on_update": "mailit.config.stock_entry.on_workflow_state_change",
+    },
+    "Purchase Receipt": {
+        "on_update": "mailit.config.stock_entry.on_workflow_state_change",
+    },
+    "Sales Order": {
+        "on_update": "mailit.config.stock_entry.on_workflow_state_change",
+    },
+    "Sales Invoice": {
+        "on_update": "mailit.config.stock_entry.on_workflow_state_change",
+    },
+    "Delivery Note": {
+        "on_update": "mailit.config.stock_entry.on_workflow_state_change",
+    },
     "Stock Entry": {
         "validate": [
             "mailit.config.api.stock_entry_validate",
             "mailit.config.api.validate_material_issue"
+        ],
+        "on_update": "mailit.config.stock_entry.on_workflow_state_change",
+    }
+}
+
+scheduler_events = {
+    "cron": {
+        "*/5 * * * *": [
+            "mailit.config.stock_entry.send_approval_escalations"
         ]
     }
 }
