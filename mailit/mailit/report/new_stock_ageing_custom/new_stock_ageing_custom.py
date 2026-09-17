@@ -1270,11 +1270,13 @@ PO_LINKED_VOUCHER_ITEM_DOCTYPES = {
 	"Purchase Invoice": ("Purchase Invoice Item", "po_detail"),
 }
 
-# Fields of one PO paper-trail record, in report column order. They are kept together as a
-# tuple -- one per originating receipt -- so a line never pairs one PO's number with another's
-# reference or sales order. item_details entries hold these tuples in a "po_trails" set.
+# Fields of the PO paper-trail, in report column order. Each item shows on a single report line,
+# so item_details entries hold one set of distinct values per field in a "po_trail" dict.
 PO_TRAIL_FIELDS = ("plant", "po_number", "requester", "supplier", "reference_no", "so_number")
-EMPTY_PO_TRAIL = ("",) * len(PO_TRAIL_FIELDS)
+
+
+def get_empty_po_trail() -> dict:
+	return {field: set() for field in PO_TRAIL_FIELDS}
 
 
 def execute(filters: Filters = None) -> tuple:
@@ -1298,16 +1300,26 @@ def get_float_precision() -> int:
 	return cint(frappe.db.get_single_value("System Settings", "float_precision", cache=True))
 
 
-def get_po_trails(item_dict: dict) -> list[tuple]:
-	"""PO paper-trails of an item, one per report line, in a stable order.
+def join_values(values: set) -> str:
+	"Comma-join a set of PO paper-trail values, skipping empties, in a stable order."
+	return ", ".join(sorted({v for v in values if v}))
 
-	Stock with no PO trail still gets a single (blank) line.
+
+def has_receipt_filter(filters: Filters) -> bool:
+	"True when the report is narrowed down to the receipts of one Purchase Order / Sales Order."
+	return bool(filters.get("po_number") or filters.get("so_number"))
+
+
+def get_available_qty(item_dict: dict, precision: int) -> float:
+	"""Accepted quantity of the item's purchase receipts.
+
+	Stock that never came through a receipt (e.g. opening stock) falls back to its balance.
 	"""
-	return sorted(item_dict.get("po_trails") or {EMPTY_PO_TRAIL})
+	return flt(item_dict.get("accepted_qty"), precision) or flt(item_dict.get("total_qty"), precision)
 
 
 def format_report_data(filters: Filters, item_details: dict, to_date: str) -> list[list]:
-	"Returns ordered, formatted data with ranges."
+	"Returns ordered, formatted data with ranges. Every item gets exactly one line."
 	data = []
 
 	precision = get_float_precision()
@@ -1316,13 +1328,16 @@ def format_report_data(filters: Filters, item_details: dict, to_date: str) -> li
 		if not flt(item_dict.get("total_qty"), precision):
 			continue
 
+		# with a PO / SO filter, only items received against that order are relevant
+		if has_receipt_filter(filters) and not flt(item_dict.get("accepted_qty"), precision):
+			continue
+
 		details = item_dict["details"]
 		fifo_queue = get_report_fifo_queue(item_dict["fifo_queue"], details.has_batch_no)
 		if not fifo_queue:
 			continue
 
-		for po_trail in get_po_trails(item_dict):
-			data.append(get_report_row(filters, item_dict, fifo_queue, to_date, precision, po_trail))
+		data.append(get_report_row(filters, item_dict, fifo_queue, to_date, precision))
 
 	return data
 
@@ -1349,10 +1364,9 @@ def get_batch_report_slot(slot: list) -> list:
 	return slot
 
 
-def get_report_row(
-	filters: Filters, item_dict: dict, fifo_queue: list, to_date: str, precision: int, po_trail: tuple
-) -> list:
+def get_report_row(filters: Filters, item_dict: dict, fifo_queue: list, to_date: str, precision: int) -> list:
 	details = item_dict["details"]
+	po_trail = item_dict.get("po_trail") or get_empty_po_trail()
 	range_values = get_range_age(filters, fifo_queue, to_date, item_dict, precision)
 	row = [details.name, details.item_name, details.description, details.item_group, details.brand]
 
@@ -1361,14 +1375,14 @@ def get_report_row(
 
 	row.extend(
 		[
-			flt(item_dict.get("total_qty"), precision),
+			get_available_qty(item_dict, precision),
 			get_average_age(fifo_queue, to_date),
 			*range_values,
 			date_diff(to_date, fifo_queue[0][FIFO_DATE_INDEX]),
 			date_diff(to_date, fifo_queue[-1][FIFO_DATE_INDEX]),
 			details.stock_uom,
 			flt(details.valuation_rate, precision),
-			*po_trail,
+			*(join_values(po_trail[field]) for field in PO_TRAIL_FIELDS),
 		]
 	)
 
@@ -1485,12 +1499,13 @@ def get_columns(filters: Filters) -> list[dict]:
 				"fieldtype": "Currency",
 				"width": 120,
 			},
-			{"label": _("Plant"), "fieldname": "plant", "fieldtype": "Link", "options": "Warehouse","width": 100},
-			{"label": _("PO Number"), "fieldname": "po_number", "fieldtype": "Link","options": "Purchase Order", "width": 130},
+			# PO paper-trail cells may hold several comma-separated values, so they are plain Data
+			{"label": _("Plant"), "fieldname": "plant", "fieldtype": "Data", "width": 100},
+			{"label": _("PO Number"), "fieldname": "po_number", "fieldtype": "Data", "width": 130},
 			{"label": _("Requester"), "fieldname": "requester", "fieldtype": "Data", "width": 130},
-			{"label": _("Supplier"), "fieldname": "supplier", "fieldtype": "Link","options": "Supplier", "width": 150},
+			{"label": _("Supplier"), "fieldname": "supplier", "fieldtype": "Data", "width": 150},
 			{"label": _("Reference No"), "fieldname": "reference_no", "fieldtype": "Data", "width": 130},
-			{"label": _("SO Number"), "fieldname": "so_number", "fieldtype": "Link","options": "Sales Order", "width": 130},
+			{"label": _("SO Number"), "fieldname": "so_number", "fieldtype": "Data", "width": 130},
 		]
 	)
 
@@ -1737,9 +1752,11 @@ class FIFOSlots:
 
 	def _prefetch_po_details(self) -> None:
 		"""
-		Prefetch the Purchase Order paper-trail (plant/PO number/requester/supplier/reference/SO number)
-		for every Purchase Receipt / Purchase Invoice detail row that was sourced from a PO,
-		keyed by voucher_detail_no so it can be looked up per-SLE during the streaming pass.
+		Prefetch the accepted warehouse and the Purchase Order paper-trail
+		(plant/PO number/requester/supplier/reference/SO number) of every Purchase Receipt /
+		Purchase Invoice detail row, keyed by voucher_detail_no so it can be looked up per-SLE
+		during the streaming pass. Receipts made without a PO are kept too (with a blank trail),
+		because their accepted quantity still counts.
 		"""
 		self.po_details_by_voucher_detail = {}
 
@@ -1756,14 +1773,15 @@ class FIFOSlots:
 				frappe.qb.from_(sle)
 				.join(voucher_item)
 				.on(sle.voucher_detail_no == voucher_item.name)
-				.join(poi)
+				.left_join(poi)
 				.on(voucher_item[link_field] == poi.name)
-				.join(po)
+				.left_join(po)
 				.on(poi.parent == po.name)
 				.left_join(soi)
 				.on(soi.purchase_order_item == poi.name)
 				.select(
 					sle.voucher_detail_no,
+					voucher_item.warehouse.as_("accepted_warehouse"),
 					po.name.as_("po_number"),
 					po.order_confirmation_no,
 					po.supplier_name,
@@ -1776,9 +1794,15 @@ class FIFOSlots:
 					& (sle.company == self.filters.get("company"))
 					& (sle.posting_datetime <= to_date)
 					& (sle.is_cancelled != 1)
-					& (voucher_item[link_field].isnotnull())
 				)
 			)
+
+			# PO / SO filters narrow the report down to the receipts of that order
+			if self.filters.get("po_number"):
+				query = query.where(po.name == self.filters.get("po_number"))
+
+			if self.filters.get("so_number"):
+				query = query.where(soi.parent == self.filters.get("so_number"))
 
 			query = self._apply_filter(query, sle, "item_code")
 
@@ -1786,27 +1810,45 @@ class FIFOSlots:
 				query = self._get_warehouse_conditions(sle, query)
 
 			for row in query.run(as_dict=True):
-				self.po_details_by_voucher_detail[row.voucher_detail_no] = {
-					"plant": row.plant,
-					"po_number": row.po_number,
-					"requester": row.requester,
-					"supplier": row.supplier_name,
-					"reference_no": row.order_confirmation_no,
-					"so_number": row.so_number,
-				}
+				po_info = self.po_details_by_voucher_detail.setdefault(
+					row.voucher_detail_no,
+					{
+						"accepted_warehouse": row.accepted_warehouse,
+						"plant": row.plant,
+						"po_number": row.po_number,
+						"requester": row.requester,
+						"supplier": row.supplier_name,
+						"reference_no": row.order_confirmation_no,
+						"so_numbers": set(),
+					},
+				)
+				# one PO line can be linked to several Sales Orders
+				if row.so_number:
+					po_info["so_numbers"].add(row.so_number)
 
 	def _update_po_details(self, row: dict, key: tuple) -> None:
-		"Attach PO paper-trail info to the item row for incoming, PO-sourced stock."
-		if row.actual_qty <= 0:
-			return
-
+		"Add the accepted receipt quantity and the PO paper-trail to the item row."
 		po_info = self.po_details_by_voucher_detail.get(row.voucher_detail_no)
 		if not po_info:
 			return
 
-		trail = tuple(po_info.get(field) or "" for field in PO_TRAIL_FIELDS)
-		if any(trail):
-			self.item_details[key]["po_trails"].add(trail)
+		# the rejected-warehouse SLE shares the voucher_detail_no, only accepted stock counts
+		if row.warehouse != po_info["accepted_warehouse"]:
+			return
+
+		# purchase returns post negative quantities and net off the accepted quantity
+		item_row = self.item_details[key]
+		item_row["accepted_qty"] += flt(row.actual_qty)
+
+		if row.actual_qty <= 0:
+			return
+
+		po_trail = item_row["po_trail"]
+		for field in PO_TRAIL_FIELDS:
+			if field == "so_number":
+				po_trail[field] |= po_info["so_numbers"]
+			elif po_info.get(field):
+				po_trail[field].add(po_info[field])
 
 	def _init_key_stores(self, row: dict) -> tuple:
 		"Initialise keys and FIFO Queue."
@@ -1817,7 +1859,8 @@ class FIFOSlots:
 			{
 				"details": row,
 				"fifo_queue": [],
-				"po_trails": set(),
+				"accepted_qty": 0.0,
+				"po_trail": get_empty_po_trail(),
 			},
 		)
 		fifo_queue = self.item_details[key]["fifo_queue"]
@@ -2233,7 +2276,8 @@ class FIFOSlots:
 						"fifo_queue": [],
 						"qty_after_transaction": 0.0,
 						"total_qty": 0.0,
-						"po_trails": set(),
+						"accepted_qty": 0.0,
+						"po_trail": get_empty_po_trail(),
 					},
 				)
 			item_row = item_aggregated_data.get(item)
@@ -2244,7 +2288,9 @@ class FIFOSlots:
 			item_row["has_serial_no"] = row["has_serial_no"]
 			item_row["has_batch_no"] = row["has_batch_no"]
 
-			item_row["po_trails"] |= row.get("po_trails", set())
+			item_row["accepted_qty"] += flt(row.get("accepted_qty"))
+			for field, values in (row.get("po_trail") or {}).items():
+				item_row["po_trail"][field] |= values
 
 		return item_aggregated_data
 

@@ -54,6 +54,18 @@ frappe.query_reports["New Stock Ageing Custom"] = {
 			options: "Brand",
 		},
 		{
+			fieldname: "po_number",
+			label: __("PO No"),
+			fieldtype: "Link",
+			options: "Purchase Order",
+		},
+		{
+			fieldname: "so_number",
+			label: __("SO No"),
+			fieldtype: "Link",
+			options: "Sales Order",
+		},
+		{
 			fieldname: "range",
 			label: __("Ageing Range"),
 			fieldtype: "Data",
