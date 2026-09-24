@@ -1345,6 +1345,12 @@ def format_report_data(filters: Filters, item_details: dict, to_date: str) -> li
 		if po_rows:
 			for po_row in po_rows:
 				data.append(get_report_row(filters, item_dict, po_row["slots"], po_row, to_date, precision))
+
+			if not has_receipt_filter(filters):
+				# balance qty as per the Stock Ledger, on its own line below the item's PO lines
+				data.append(
+					get_current_stock_row(filters, item_dict, flt(item_dict["total_qty"], precision), precision)
+				)
 		elif not has_receipt_filter(filters):
 			# stock that never came through a receipt (e.g. opening stock) is aged from its FIFO queue
 			po_row = get_empty_po_row()
@@ -1352,6 +1358,30 @@ def format_report_data(filters: Filters, item_details: dict, to_date: str) -> li
 			data.append(get_report_row(filters, item_dict, fifo_queue, po_row, to_date, precision))
 
 	return data
+
+
+def get_current_stock_row(filters: Filters, item_dict: dict, qty: float, precision: int) -> list:
+	"A summary line carrying the item's current Stock Ledger balance in the Available Qty column."
+	details = item_dict["details"]
+	row = [details.name, details.item_name, _("Current Stock"), details.item_group, details.brand]
+
+	if filters.get("show_warehouse_wise_stock"):
+		row.append(details.warehouse)
+
+	row.extend(
+		[
+			qty,
+			0.0,
+			*([0.0] * ((len(filters.ranges) * 2) + 2)),
+			0,
+			0,
+			details.stock_uom,
+			flt(details.valuation_rate, precision),
+			*([""] * len(PO_TRAIL_FIELDS)),
+		]
+	)
+
+	return row
 
 
 def get_report_po_rows(item_dict: dict, precision: int) -> list[dict]:
